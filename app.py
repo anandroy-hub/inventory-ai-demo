@@ -4,6 +4,7 @@ import numpy as np
 import re
 import os
 import json
+import socket
 from difflib import SequenceMatcher
 from urllib import request, error
 
@@ -125,7 +126,7 @@ def call_hf_inference(model, payload, token, warning_message):
             st.warning(f"{warning_message} ({result.get('error')})")
             return None
         return result
-    except (error.HTTPError, error.URLError, TimeoutError, ValueError) as exc:
+    except (error.HTTPError, error.URLError, socket.timeout, ValueError) as exc:
         st.warning(f"{warning_message} ({exc.__class__.__name__})")
         return None
 
