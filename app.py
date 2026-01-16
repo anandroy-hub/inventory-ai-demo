@@ -9,194 +9,153 @@ from sklearn.ensemble import IsolationForest
 import plotly.express as px
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="AI Inventory Manager", layout="wide", page_icon="📦")
+st.set_page_config(page_title="AI Inventory Intelligence", layout="wide", page_icon="⚙️")
+
+# --- CUSTOM STYLING ---
+st.markdown("""
+    <style>
+    .main { background-color: #f5f7f9; }
+    .stMetric { background-color: #ffffff; border-radius: 10px; padding: 15px; border: 1px solid #e6e9ef; }
+    </style>
+    """, unsafe_allow_html=True)
 
 # --- HEADER ---
-st.title("📦 AI Inventory Intelligence Platform")
+st.title("⚙️ AI-Powered Supply Chain Data Auditor")
 st.markdown("""
-**System Status:** 🟢 Online  
-**Pipeline:** Cloud-Native ETL & ML  
-**Logic:** Strict Separation of *ID Validation* (Exact) and *Description Matching* (Fuzzy).
+**TPM Technical Demo:** This platform automates ETL, detects technical anomalies, and performs 'Spec-Aware' duplicate detection for industrial part inventories.
 """)
 
-# --- ETL PIPELINE ---
+# --- LOGIC & HELPERS ---
+def extract_specs(text):
+    """Extracts Size and Material to avoid the 'Number Trap'."""
+    # Common sizes (e.g., 1/2", 10MM, 24IN)
+    sizes = re.findall(r'(\d+(?:[./]\d+)?\s?(?:"|IN|MM|NB|NBX|X|NB X|INCH))', text.upper())
+    # Common Industrial Materials (MOC)
+    mats = re.findall(r'\b(SS316|SS304|SS316L|MS|PVC|UPVC|CPVC|GI|CS|CARBON STEEL|BRASS|TITANIUM|PP|HDPE|VITON|NEOPRENE)\b', text.upper())
+    return ", ".join(set(sizes)), ", ".join(set(mats))
+
 @st.cache_data
-def load_and_process_data(file_path):
-    # 1. Ingestion
-    try:
-        df = pd.read_csv(file_path, encoding='utf-8', on_bad_lines='skip')
-    except Exception as e:
-        return None, f"Error reading file: {e}"
-
-    # 2. Smart Column Detection
+def run_pipeline(file_path):
+    # 1. LOAD
+    df = pd.read_csv(file_path)
     df.columns = [c.strip() for c in df.columns]
-    
-    # Identify ID Column (Look for 'Item', 'No', 'ID', 'Code')
-    id_col = next((c for c in df.columns if any(x in c.lower() for x in ['item', 'no.', 'id', 'code'])), df.columns[0])
-    
-    # Identify Description Column (Look for 'Desc', 'Name' or longest text column)
-    desc_col = next((c for c in df.columns if 'desc' in c.lower()), None)
-    if not desc_col:
-        # Fallback: Find column with longest average string length
-        text_cols = df.select_dtypes(include=['object'])
-        if not text_cols.empty:
-            desc_col = text_cols.apply(lambda x: x.str.len().mean()).idxmax()
-        else:
-            desc_col = df.columns[1]
+    # Standardize columns based on your specific 543-row format
+    df.columns = ['Index', 'Item_No', 'Description', 'UoM']
 
-    # 3. Data Cleaning
-    def clean_text(text):
-        if not isinstance(text, str): return ""
-        text = text.lower()
+    # 2. ENRICH (TPM DOMAIN LOGIC)
+    # Extract Department from Prefix
+    prefix_map = {
+        'BM': 'CIVIL', 'CN': 'CONSUMABLES', 'IN': 'INSTRUMENTATION', 
+        'IT': 'IT', 'PM': 'PRODUCTION', 'PROJ': 'PROJECTS', 
+        'PS': 'STORES', 'SP': 'SPARE PARTS', 'TL': 'TOOLS'
+    }
+    df['Dept'] = df['Item_No'].str.extract(r'^([A-Z]+)')[0].map(prefix_map).fillna('GENERAL')
+    
+    # 3. CLEAN & EXTRACT SPECS
+    def deep_clean(text):
+        text = str(text).upper()
         text = re.sub(r'"+', '', text) # Remove quote artifacts
-        text = re.sub(r'[^a-z0-9\s./-]', ' ', text) # Keep alphanumeric + basic punctuation
-        return re.sub(r'\s+', ' ', text).strip()
+        return " ".join(text.split()).strip()
 
-    df['Clean_Desc'] = df[desc_col].apply(clean_text)
-
-    # 4. AI Categorization (K-Means)
-    try:
-        tfidf = TfidfVectorizer(max_features=500, stop_words='english')
-        tfidf_matrix = tfidf.fit_transform(df['Clean_Desc'])
-        
-        kmeans = KMeans(n_clusters=6, random_state=42)
-        df['Cluster_ID'] = kmeans.fit_predict(tfidf_matrix)
-        
-        # Auto-Labeling
-        terms = tfidf.get_feature_names_out()
-        cluster_names = {}
-        for i in range(6):
-            center = kmeans.cluster_centers_[i]
-            top_terms = [terms[ind] for ind in center.argsort()[-3:]]
-            cluster_names[i] = " / ".join(top_terms).upper()
-        df['AI_Category'] = df['Cluster_ID'].map(cluster_names)
-    except:
-        df['AI_Category'] = "Uncategorized"
-
-    # 5. Anomaly Detection (Isolation Forest)
-    # Features: Description Length, Digit Count (Complexity)
-    df['Desc_Len'] = df['Clean_Desc'].apply(len)
-    df['Digit_Count'] = df['Clean_Desc'].apply(lambda x: len(re.findall(r'\d', x)))
+    df['Clean_Desc'] = df['Description'].apply(deep_clean)
+    df[['Extracted_Size', 'Extracted_Material']] = df['Clean_Desc'].apply(lambda x: pd.Series(extract_specs(x)))
     
-    iso = IsolationForest(contamination=0.05, random_state=42)
-    df['Anomaly_Score'] = iso.fit_predict(df[['Desc_Len', 'Digit_Count']])
-    df['Is_Anomaly'] = df['Anomaly_Score'].apply(lambda x: 'High Risk' if x == -1 else 'Normal')
+    # 4. AI CATEGORIZATION (TF-IDF + K-MEANS)
+    tfidf = TfidfVectorizer(max_features=500, stop_words='english')
+    tfidf_matrix = tfidf.fit_transform(df['Clean_Desc'])
+    kmeans = KMeans(n_clusters=8, random_state=42, n_init=10)
+    df['Cluster_ID'] = kmeans.fit_predict(tfidf_matrix)
+    
+    # Auto-label clusters
+    terms = tfidf.get_feature_names_out()
+    cluster_labels = {}
+    for i in range(8):
+        top_indices = kmeans.cluster_centers_[i].argsort()[-2:][::-1]
+        cluster_labels[i] = " ".join([terms[ind] for ind in top_indices]).upper()
+    df['AI_SubCategory'] = df['Cluster_ID'].map(cluster_labels)
 
-    return df, id_col, desc_col
-
-# --- DUPLICATE LOGIC ---
-def run_duplicate_check(df, id_col, desc_col):
+    # 5. ANOMALY DETECTION (Isolation Forest)
+    df['Desc_Length'] = df['Clean_Desc'].apply(len)
+    df['Complexity'] = df['Clean_Desc'].apply(lambda x: len(re.findall(r'[^A-Z0-9\s]', x)))
+    iso = IsolationForest(contamination=0.03, random_state=42)
+    df['Anomaly_Tag'] = iso.fit_predict(df[['Desc_Length', 'Complexity']])
+    
+    # 6. SMART DUPLICATE DETECTION (Fuzzy + Spec Validation)
     duplicates = []
-    
-    # Check 1: Exact ID Duplicates (Critical Data Error)
-    exact_id_dups = df[df.duplicated(subset=[id_col], keep=False)]
-    if not exact_id_dups.empty:
-        for i, row in exact_id_dups.iterrows():
-             duplicates.append({
-                'Type': 'CRITICAL: Same ID',
-                'Item A': row[id_col],
-                'Item B': row[id_col],
-                'Description A': row[desc_col],
-                'Description B': 'SAME ID EXISTS TWICE',
-                'Score': '100%'
-            })
-
-    # Check 2: Fuzzy Description Matches (Potential SKU Merge)
-    # Optimization: Convert to list of dicts for speed
     records = df.to_dict('records')
-    limit = min(len(records), 600) # Cloud resource cap
-    
-    for i in range(limit):
-        for j in range(i + 1, limit):
-            # Strict Rule: Only compare if IDs are DIFFERENT
-            if records[i][id_col] == records[j][id_col]:
-                continue
+    for i in range(len(records)):
+        for j in range(i + 1, min(i + 200, len(records))): # Optimized windowing
+            r1, r2 = records[i], records[j]
+            
+            # Fuzzy match the text
+            sim = SequenceMatcher(None, r1['Clean_Desc'], r2['Clean_Desc']).ratio()
+            
+            if sim > 0.85:
+                # TPM Logic: If text is similar but sizes/materials differ, it's a VARIANT, not a duplicate.
+                is_variant = (r1['Extracted_Size'] != r2['Extracted_Size']) or (r1['Extracted_Material'] != r2['Extracted_Material'])
                 
-            # Heuristic Blocking: Skip if length difference is huge
-            if abs(len(records[i]['Clean_Desc']) - len(records[j]['Clean_Desc'])) > 8:
-                continue
-            
-            # Levenshtein Ratio
-            ratio = SequenceMatcher(None, records[i]['Clean_Desc'], records[j]['Clean_Desc']).ratio()
-            
-            if ratio > 0.88: # Threshold (88% similarity)
                 duplicates.append({
-                    'Type': 'WARNING: Fuzzy Match',
-                    'Item A': records[i][id_col],
-                    'Item B': records[j][id_col],
-                    'Description A': records[i][desc_col],
-                    'Description B': records[j][desc_col],
-                    'Score': f"{ratio:.1%}"
+                    'Item A': r1['Item_No'],
+                    'Item B': r2['Item_No'],
+                    'Description A': r1['Clean_Desc'],
+                    'Description B': r2['Clean_Desc'],
+                    'Similarity': f"{sim:.1%}",
+                    'Finding': "🛠️ Variant (Distinct SKU)" if is_variant else "🚨 Potential Duplicate"
                 })
                 
-    return pd.DataFrame(duplicates)
+    return df, pd.DataFrame(duplicates)
 
 # --- EXECUTION ---
-# Load Data directly from Repo
-file_path = 'raw_data.csv' 
 try:
-    df, id_col, desc_col = load_and_process_data(file_path)
-except:
-    st.warning("Data file 'raw_data.csv' not found in repository. Please upload it.")
+    df, dups = run_pipeline('raw_data.csv')
+except FileNotFoundError:
+    st.error("Error: 'raw_data.csv' not found. Please upload it to your GitHub repo.")
     st.stop()
-
-if isinstance(df, str): # Error catch
-    st.error(df)
-    st.stop()
-
-# Calculate Duplicates
-dups_df = run_duplicate_check(df, id_col, desc_col)
 
 # --- DASHBOARD UI ---
-
-# Top Metrics
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Total SKU Count", len(df))
-m2.metric("Categories Identified", df['AI_Category'].nunique())
-m3.metric("Anomalies Flagged", len(df[df['Is_Anomaly']=='High Risk']))
-m4.metric("Duplicate Conflicts", len(dups_df))
+m1.metric("SKUs Analyzed", len(df))
+m2.metric("Dept Categories", df['Dept'].nunique())
+m3.metric("Anomalies Found", len(df[df['Anomaly_Tag'] == -1]))
+m4.metric("Conflicts Found", len(dups))
 
-# Tabs
-tab1, tab2, tab3 = st.tabs(["📊 AI Categorization", "🚨 Anomaly Detection", "👯 Duplicate Manager"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Inventory Structure", "🚨 Quality Audit", "👯 Duplicate Manager", "📝 Data Explorer"])
 
 with tab1:
-    st.subheader("Automated Inventory Clustering")
-    st.markdown("Items grouped by semantic similarity using **Unsupervised Learning (K-Means)**.")
-    
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        # Bar Chart
-        chart_data = df['AI_Category'].value_counts().reset_index()
-        chart_data.columns = ['Category', 'Count']
-        fig = px.bar(chart_data, x='Count', y='Category', orientation='h', color='Count', title="Category Distribution")
-        st.plotly_chart(fig, use_container_width=True)
-    with col2:
-        st.dataframe(df[[id_col, desc_col, 'AI_Category']].head(100), height=400)
+    st.subheader("Departmental & AI Categorization")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        fig1 = px.pie(df, names='Dept', title="Inventory by Department (Prefix Logic)", hole=0.4)
+        st.plotly_chart(fig1, use_container_width=True)
+    with col_b:
+        fig2 = px.bar(df['AI_SubCategory'].value_counts().head(10), title="Top AI-Detected Sub-Categories")
+        st.plotly_chart(fig2, use_container_width=True)
 
 with tab2:
-    st.subheader("Outlier Detection (Isolation Forest)")
-    st.markdown("These items deviate significantly from standard description patterns (Length/Complexity).")
+    st.subheader("Data Quality Anomalies")
+    st.info("Isolation Forest identified items with non-standard description patterns.")
+    anomalies = df[df['Anomaly_Tag'] == -1]
+    st.dataframe(anomalies[['Item_No', 'Description', 'Dept', 'AI_SubCategory']], use_container_width=True)
     
-    anomalies = df[df['Is_Anomaly']=='High Risk']
-    st.dataframe(anomalies[[id_col, desc_col, 'Desc_Len', 'Digit_Count']], use_container_width=True)
-    
-    # Scatter Visual
-    fig2 = px.scatter(df, x='Desc_Len', y='Digit_Count', color='Is_Anomaly', 
-                      title="Anomaly Visualization: Description Length vs. Digit Count",
-                      color_discrete_map={'Normal':'#00CC96', 'High Risk':'#EF553B'},
-                      hover_data=[desc_col])
-    st.plotly_chart(fig2, use_container_width=True)
+    fig3 = px.scatter(df, x="Desc_Length", y="Complexity", color="Anomaly_Tag", 
+                     hover_data=['Clean_Desc'], title="Anomaly Distribution Graph")
+    st.plotly_chart(fig3, use_container_width=True)
 
 with tab3:
-    st.subheader("Inventory Conflict Resolution")
-    st.info(f"**Policy:** Exact ID matches are CRITICAL errors. Fuzzy description matches (different IDs) are WARNINGS.")
+    st.subheader("Smart Duplicate Management")
+    st.warning("Logic: Items with similar text but different technical specs (Size/Material) are marked as 'Variants'.")
     
-    if not dups_df.empty:
-        # Color code the dataframe based on Type
-        def highlight_type(val):
-            color = 'red' if 'CRITICAL' in val else 'orange'
-            return f'color: {color}; font-weight: bold'
-            
-        st.dataframe(dups_df.style.applymap(highlight_type, subset=['Type']), use_container_width=True)
+    if not dups.empty:
+        # Filter for only true duplicates or variants
+        view_filter = st.radio("Filter Finding:", ["All Conflicts", "Potential Duplicates", "Variants"])
+        if view_filter != "All Conflicts":
+            display_dups = dups[dups['Finding'].str.contains(view_filter.split()[0])]
+        else:
+            display_dups = dups
+        st.dataframe(display_dups, use_container_width=True)
     else:
-        st.success("✅ Clean Data! No duplicates detected.")
+        st.success("No conflicts detected.")
+
+with tab4:
+    st.subheader("Full Processed Dataset")
+    st.dataframe(df[['Item_No', 'Clean_Desc', 'UoM', 'Dept', 'AI_SubCategory', 'Extracted_Size', 'Extracted_Material']])
