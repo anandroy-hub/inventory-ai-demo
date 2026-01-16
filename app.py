@@ -20,8 +20,8 @@ st.set_page_config(page_title="AI Inventory Auditor Pro", layout="wide", page_ic
 
 # --- KNOWLEDGE BASE: DOMAIN LOGIC ---
 DEFAULT_PRODUCT_GROUP = "Consumables & General"
-MIN_DISTANCE_THRESHOLD = 1e-8
-COMPARISON_WINDOW_SIZE = 50
+MIN_DISTANCE_THRESHOLD = 1e-8  # Prevent divide-by-zero in distance-based confidence.
+COMPARISON_WINDOW_SIZE = 50  # Windowed comparisons keep duplicate checks lightweight.
 FUZZY_SIMILARITY_THRESHOLD = 0.85
 SEMANTIC_SIMILARITY_THRESHOLD = 0.9
 
@@ -88,7 +88,7 @@ def dominant_group(series):
 def get_zero_shot_classifier():
     try:
         return pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
-    except Exception:
+    except (OSError, ImportError, ValueError):
         st.warning("Hugging Face classifier unavailable; using existing categories.")
         return None
 
@@ -96,7 +96,7 @@ def get_zero_shot_classifier():
 def get_sentence_model():
     try:
         return SentenceTransformer("all-MiniLM-L6-v2")
-    except Exception:
+    except (OSError, ImportError, ValueError):
         st.warning("Sentence-transformer model unavailable; falling back to TF-IDF signals.")
         return None
 
@@ -111,7 +111,7 @@ def run_hf_zero_shot(texts, labels):
         if isinstance(results, dict):
             results = [results]
         return results
-    except Exception:
+    except (RuntimeError, ValueError):
         st.warning("Hugging Face classification failed; using existing categories.")
         return None
 
@@ -124,7 +124,7 @@ def compute_embeddings(texts):
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms[norms == 0] = 1
         return embeddings / norms
-    except Exception:
+    except (RuntimeError, ValueError):
         st.warning("Embedding generation failed; falling back to TF-IDF signals.")
         return None
 
@@ -148,7 +148,9 @@ def run_intelligent_audit(file_path):
     kmeans = KMeans(n_clusters=8, random_state=42, n_init=10)
     df['Cluster_ID'] = kmeans.fit_predict(tfidf_matrix)
     dists = kmeans.transform(tfidf_matrix)
-    df['Confidence'] = (1 - (np.min(dists, axis=1) / np.max(dists, axis=1))).round(4)
+    max_tfidf_dist = np.max(dists, axis=1)
+    max_tfidf_dist = np.where(max_tfidf_dist == 0, MIN_DISTANCE_THRESHOLD, max_tfidf_dist)
+    df['Confidence'] = (1 - (np.min(dists, axis=1) / max_tfidf_dist)).round(4)
     cluster_groups = df.groupby('Cluster_ID')['Product_Group'].agg(dominant_group)
     df['Cluster_Group'] = df['Cluster_ID'].map(cluster_groups)
     df['Cluster_Validated'] = df['Product_Group'] == df['Cluster_Group']
@@ -384,7 +386,7 @@ with page[2]:
 
     with t3:
         st.subheader("Semantic Duplicate Audit (Sentence-Transformers)")
-        if df['HF_Embedding'].isnull().all():
+        if df['HF_Embedding'].apply(lambda x: x is None).all():
             st.info("Semantic duplicate detection unavailable (HF embeddings not loaded).")
         else:
             sem_list = []
