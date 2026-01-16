@@ -17,6 +17,8 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="AI Inventory Auditor Pro", layout="wide", page_icon="🛡️")
 
 # --- KNOWLEDGE BASE: DOMAIN LOGIC ---
+DEFAULT_PRODUCT_GROUP = "Consumables & General"
+
 PRODUCT_GROUPS = {
     "Piping & Fittings": ["FLANGE", "PIPE", "ELBOW", "TEE", "UNION", "REDUCER", "BEND", "COUPLING", "NIPPLE", "BUSHING", "UPVC", "CPVC", "PVC"],
     "Valves & Actuators": ["BALL VALVE", "GATE VALVE", "PLUG VALVE", "CHECK VALVE", "GLOBE VALVE", "CONTROL VALVE", "VALVE", "ACTUATOR", "COCK"],
@@ -70,7 +72,7 @@ def map_product_group(noun):
         for keyword in keywords:
             if re.search(token_pattern(keyword), noun):
                 return group
-    return "Consumables & General"
+    return DEFAULT_PRODUCT_GROUP
 
 def dominant_group(series):
     counts = series.value_counts()
@@ -87,6 +89,7 @@ def run_intelligent_audit(file_path):
     df['Standard_Desc'] = df[desc_col].apply(clean_description)
     df['Part_Noun'] = df['Standard_Desc'].apply(intelligent_noun_extractor)
     df['Product_Group'] = df['Part_Noun'].apply(map_product_group)
+    df.loc[~df['Product_Group'].isin(PRODUCT_GROUPS.keys()), 'Product_Group'] = DEFAULT_PRODUCT_GROUP
 
     # NLP & Topic Modeling
     tfidf = TfidfVectorizer(max_features=300, stop_words='english')
