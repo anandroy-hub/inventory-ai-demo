@@ -12,6 +12,8 @@ from sklearn.ensemble import IsolationForest
 from sklearn.cluster import KMeans
 import plotly.express as px
 import plotly.graph_objects as go
+from transformers import pipeline
+from sentence_transformers import SentenceTransformer
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Inventory Auditor Pro", layout="wide", page_icon="🛡️")
@@ -75,8 +77,46 @@ def map_product_group(noun):
     return DEFAULT_PRODUCT_GROUP
 
 def dominant_group(series):
-    counts = series.value_counts()
-    return counts.idxmax() if not counts.empty else "UNMAPPED"
+    counts = series.value_counts()
+    return counts.idxmax() if not counts.empty else "UNMAPPED"
+
+@st.cache_resource
+def get_zero_shot_classifier():
+    try:
+        return pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
+    except Exception:
+        return None
+
+@st.cache_resource
+def get_sentence_model():
+    try:
+        return SentenceTransformer("all-MiniLM-L6-v2")
+    except Exception:
+        return None
+
+def run_hf_zero_shot(texts, labels):
+    classifier = get_zero_shot_classifier()
+    if not classifier:
+        return None
+    try:
+        results = classifier(texts, candidate_labels=labels, batch_size=8)
+        if isinstance(results, dict):
+            results = [results]
+        return results
+    except Exception:
+        return None
+
+def compute_embeddings(texts):
+    model = get_sentence_model()
+    if not model:
+        return None
+    try:
+        embeddings = model.encode(texts, show_progress_bar=False)
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms[norms == 0] = 1
+        return embeddings / norms
+    except Exception:
+        return None
 
 # --- MAIN ENGINE ---
 @st.cache_data
@@ -99,18 +139,45 @@ def run_intelligent_audit(file_path):
     df['Cluster_ID'] = kmeans.fit_predict(tfidf_matrix)
     dists = kmeans.transform(tfidf_matrix)
     df['Confidence'] = (1 - (np.min(dists, axis=1) / np.max(dists, axis=1))).round(4)
-    cluster_groups = df.groupby('Cluster_ID')['Product_Group'].agg(dominant_group)
-    df['Cluster_Group'] = df['Cluster_ID'].map(cluster_groups)
-    df['Cluster_Validated'] = df['Product_Group'] == df['Cluster_Group']
+    cluster_groups = df.groupby('Cluster_ID')['Product_Group'].agg(dominant_group)
+    df['Cluster_Group'] = df['Cluster_ID'].map(cluster_groups)
+    df['Cluster_Validated'] = df['Product_Group'] == df['Cluster_Group']
     
-    # Anomaly
-    iso = IsolationForest(contamination=0.04, random_state=42)
-    df['Anomaly_Flag'] = iso.fit_predict(tfidf_matrix) # Using tfidf for complexity-based anomalies
+    # Anomaly
+    iso = IsolationForest(contamination=0.04, random_state=42)
+    df['Anomaly_Flag'] = iso.fit_predict(tfidf_matrix) # Using tfidf for complexity-based anomalies
 
-    # Fuzzy & Tech DNA
-    df['Tech_DNA'] = df['Standard_Desc'].apply(get_tech_dna)
-    
-    return df, id_col, desc_col
+    # Hugging Face Zero-Shot Classification
+    hf_results = run_hf_zero_shot(df['Standard_Desc'].tolist(), list(PRODUCT_GROUPS.keys()))
+    if hf_results:
+        df['HF_Product_Group'] = [res['labels'][0] for res in hf_results]
+        df['HF_Product_Confidence'] = [round(res['scores'][0], 4) for res in hf_results]
+    else:
+        df['HF_Product_Group'] = df['Product_Group']
+        df['HF_Product_Confidence'] = df['Confidence']
+
+    # Hugging Face Embeddings for Clustering/Anomaly
+    embeddings = compute_embeddings(df['Standard_Desc'].tolist())
+    if embeddings is not None:
+        kmeans_hf = KMeans(n_clusters=8, random_state=42, n_init=10)
+        df['HF_Cluster_ID'] = kmeans_hf.fit_predict(embeddings)
+        hf_dists = kmeans_hf.transform(embeddings)
+        max_dist = np.max(hf_dists, axis=1)
+        max_dist[max_dist == 0] = 1
+        df['HF_Cluster_Confidence'] = (1 - (np.min(hf_dists, axis=1) / max_dist)).round(4)
+        iso_hf = IsolationForest(contamination=0.04, random_state=42)
+        df['HF_Anomaly_Flag'] = iso_hf.fit_predict(embeddings)
+        df['HF_Embedding'] = list(embeddings)
+    else:
+        df['HF_Cluster_ID'] = df['Cluster_ID']
+        df['HF_Cluster_Confidence'] = df['Confidence']
+        df['HF_Anomaly_Flag'] = df['Anomaly_Flag']
+        df['HF_Embedding'] = [None] * len(df)
+
+    # Fuzzy & Tech DNA
+    df['Tech_DNA'] = df['Standard_Desc'].apply(get_tech_dna)
+
+    return df, id_col, desc_col
 
 # --- DATA LOADING ---
 target_file = 'raw_data.csv'
@@ -149,32 +216,55 @@ with page[0]:
     st.markdown("---")
     
     # KPI Row
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    kpi1.metric("📦 SKUs Analyzed", len(df))
-    kpi2.metric("🎯 Mean AI Confidence", f"{df['Confidence'].mean():.1%}")
-    kpi3.metric("⚠️ Anomalies Found", len(df[df['Anomaly_Flag'] == -1]))
-    kpi4.metric("🔄 Duplicate Pairs", "Audit Required")
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    kpi1.metric("📦 SKUs Analyzed", len(df))
+    kpi2.metric("🎯 Mean HF Confidence", f"{df['HF_Product_Confidence'].mean():.1%}")
+    kpi3.metric("⚠️ HF Anomalies Found", len(df[df['HF_Anomaly_Flag'] == -1]))
+    kpi4.metric("🔄 Duplicate Pairs", "Audit Required")
 
     st.markdown("---")
     
     col1, col2 = st.columns(2)
     with col1:
-        fig_pie = px.pie(df, names='Product_Group', title="Inventory Distribution by Product Category", hole=0.4)
-        st.plotly_chart(fig_pie, use_container_width=True)
+        fig_pie = px.pie(df, names='HF_Product_Group', title="Inventory Distribution by HF Product Category", hole=0.4)
+        st.plotly_chart(fig_pie, use_container_width=True)
     with col2:
         top_nouns = df['Part_Noun'].value_counts().head(10).reset_index()
         fig_bar = px.bar(top_nouns, x='Part_Noun', y='count', title="Top 10 Product Categories", labels={'Part_Noun':'Product', 'count':'Qty'})
         st.plotly_chart(fig_bar, use_container_width=True)
 
     # Health Gauge
-    health_val = (len(df[df['Anomaly_Flag'] == 1]) / len(df)) * 100
-    fig_gauge = go.Figure(go.Indicator(
-        mode = "gauge+number",
-        value = health_val,
-        title = {'text': "Catalog Data Accuracy %"},
-        gauge = {'axis': {'range': [0, 100]}, 'bar': {'color': "#00cc96"}}
-    ))
-    st.plotly_chart(fig_gauge, use_container_width=True)
+    health_val = (len(df[df['HF_Anomaly_Flag'] == 1]) / len(df)) * 100
+    fig_gauge = go.Figure(go.Indicator(
+        mode = "gauge+number",
+        value = health_val,
+        title = {'text': "Catalog Data Accuracy %"},
+        gauge = {'axis': {'range': [0, 100]}, 'bar': {'color': "#00cc96"}}
+    ))
+    st.plotly_chart(fig_gauge, use_container_width=True)
+
+    st.markdown("#### 💼 Business Insights")
+    insights = (
+        df.groupby('HF_Product_Group', dropna=False)
+        .agg(
+            Items=(id_col, 'count'),
+            Mean_HF_Confidence=('HF_Product_Confidence', 'mean'),
+            HF_Anomaly_Rate=('HF_Anomaly_Flag', lambda x: (x == -1).mean())
+        )
+        .reset_index()
+        .sort_values('Items', ascending=False)
+    )
+    insights['Mean_HF_Confidence'] = insights['Mean_HF_Confidence'].round(3)
+    insights['HF_Anomaly_Rate'] = insights['HF_Anomaly_Rate'].round(3)
+    st.dataframe(insights, use_container_width=True, height=260)
+    fig_insights = px.bar(
+        insights.head(10),
+        x='HF_Product_Group',
+        y='Mean_HF_Confidence',
+        title="Top HF Categories by Confidence",
+        labels={'HF_Product_Group': 'HF Category', 'Mean_HF_Confidence': 'Mean Confidence'}
+    )
+    st.plotly_chart(fig_insights, use_container_width=True)
 
 # --- PAGE: CATEGORIZATION AUDIT ---
 with page[1]:
@@ -193,26 +283,42 @@ with page[1]:
     st.markdown(f"**Showing {len(df)} items**")
     
     # Data Table with sorting
-    st.dataframe(
-        df[[id_col, 'Standard_Desc', 'Part_Noun', 'Product_Group', 'Confidence']].sort_values('Confidence', ascending=False),
-        use_container_width=True,
-        height=400
-    )
+    st.dataframe(
+        df[
+            [
+                id_col,
+                'Standard_Desc',
+                'Part_Noun',
+                'Product_Group',
+                'HF_Product_Group',
+                'HF_Product_Confidence',
+                'Confidence'
+            ]
+        ].sort_values('HF_Product_Confidence', ascending=False),
+        use_container_width=True,
+        height=400
+    )
     
-    summary = (
-        df.groupby('Product_Group', dropna=False)
-        .agg(Items=(id_col, 'count'), Mean_Confidence=('Confidence', 'mean'), Cluster_Match_Rate=('Cluster_Validated', 'mean'))
-        .reset_index()
-        .sort_values('Items', ascending=False)
-    )
-    summary['Mean_Confidence'] = summary['Mean_Confidence'].round(3)
-    summary['Cluster_Match_Rate'] = summary['Cluster_Match_Rate'].round(3)
-    st.markdown("#### 📌 Category Distribution & Confidence")
-    st.dataframe(summary, use_container_width=True, height=260)
+    summary = (
+        df.groupby('Product_Group', dropna=False)
+        .agg(
+            Items=(id_col, 'count'),
+            Mean_Confidence=('Confidence', 'mean'),
+            Mean_HF_Confidence=('HF_Product_Confidence', 'mean'),
+            Cluster_Match_Rate=('Cluster_Validated', 'mean')
+        )
+        .reset_index()
+        .sort_values('Items', ascending=False)
+    )
+    summary['Mean_Confidence'] = summary['Mean_Confidence'].round(3)
+    summary['Mean_HF_Confidence'] = summary['Mean_HF_Confidence'].round(3)
+    summary['Cluster_Match_Rate'] = summary['Cluster_Match_Rate'].round(3)
+    st.markdown("#### 📌 Category Distribution & Confidence")
+    st.dataframe(summary, use_container_width=True, height=260)
 
     # Distribution of confidence
-    fig_hist = px.histogram(df, x="Confidence", nbins=20, title="Confidence Score Distribution", color_discrete_sequence=['#636EFA'])
-    st.plotly_chart(fig_hist, use_container_width=True)
+    fig_hist = px.histogram(df, x="HF_Product_Confidence", nbins=20, title="HF Confidence Score Distribution", color_discrete_sequence=['#636EFA'])
+    st.plotly_chart(fig_hist, use_container_width=True)
 
 # --- PAGE: QUALITY HUB ---
 with page[2]:
@@ -229,17 +335,21 @@ with page[2]:
     
     st.markdown("---")
     
-    t1, t2 = st.tabs(["⚠️ Anomalies", "👯 Fuzzy Duplicates"])
+    t1, t2, t3 = st.tabs(["⚠️ HF Anomalies", "👯 Fuzzy Duplicates", "🧠 Semantic Duplicates"])
     
     with t1:
-        st.subheader("Statistical Anomalies (Isolation Forest)")
-        anoms = df[df['Anomaly_Flag'] == -1]
-        st.warning(f"Found {len(anoms)} anomalies in the current view.")
-        st.dataframe(anoms[[id_col, desc_col, 'Part_Noun']], use_container_width=True, height=400)
+        st.subheader("HF Embedding Anomalies (Isolation Forest)")
+        anoms = df[df['HF_Anomaly_Flag'] == -1]
+        st.warning(f"Found {len(anoms)} anomalies in the current view.")
+        st.dataframe(
+            anoms[[id_col, desc_col, 'Part_Noun', 'HF_Product_Group', 'HF_Cluster_Confidence']],
+            use_container_width=True,
+            height=400
+        )
         
-    with t2:
-        st.subheader("Fuzzy Duplicate Audit (Spec-Aware)")
-        st.info("System identifies items with >85% text similarity but differentiates based on numeric specs (Size/Gender).")
+    with t2:
+        st.subheader("Fuzzy Duplicate Audit (Spec-Aware)")
+        st.info("System identifies items with >85% text similarity but differentiates based on numeric specs (Size/Gender).")
         
         # Calculate fuzzy duplicates for the current view
         fuzzy_list = []
@@ -257,10 +367,37 @@ with page[2]:
                         'Match %': f"{sim:.1%}", 'Verdict': "🛠️ Variant" if is_variant else "🚨 Duplicate"
                     })
         
-        if fuzzy_list:
-            st.dataframe(pd.DataFrame(fuzzy_list), use_container_width=True, height=400)
-        else:
-            st.success("No fuzzy duplicates found in this filtered view.")
+        if fuzzy_list:
+            st.dataframe(pd.DataFrame(fuzzy_list), use_container_width=True, height=400)
+        else:
+            st.success("No fuzzy duplicates found in this filtered view.")
+
+    with t3:
+        st.subheader("Semantic Duplicate Audit (Sentence-Transformers)")
+        if df['HF_Embedding'].isnull().all():
+            st.info("Semantic duplicate detection unavailable (HF embeddings not loaded).")
+        else:
+            sem_list = []
+            recs = df.reset_index(drop=True).to_dict('records')
+            embeddings = [np.array(e) if e is not None else None for e in df['HF_Embedding'].tolist()]
+            for i in range(len(recs)):
+                for j in range(i + 1, min(i + 50, len(recs))):
+                    emb_i, emb_j = embeddings[i], embeddings[j]
+                    if emb_i is None or emb_j is None:
+                        continue
+                    sim = float(np.dot(emb_i, emb_j))
+                    if sim > 0.9:
+                        sem_list.append({
+                            'ID A': recs[i][id_col],
+                            'ID B': recs[j][id_col],
+                            'Desc A': recs[i]['Standard_Desc'],
+                            'Desc B': recs[j]['Standard_Desc'],
+                            'Semantic Match %': f"{sim:.1%}"
+                        })
+            if sem_list:
+                st.dataframe(pd.DataFrame(sem_list), use_container_width=True, height=400)
+            else:
+                st.success("No semantic duplicates found in this filtered view.")
 
 # --- PAGE: METHODOLOGY ---
 with page[3]:
@@ -271,15 +408,15 @@ with page[3]:
     ### 1. Data Processing (ETL)
     We standardize the raw 543 rows by stripping quote artifacts, uppercasing, and cleaning symbols. We utilize **RegEx** to extract technical specifications (Numbers, Sizes, Genders) into a "Technical DNA" profile for every part.
     
-    ### 2. Intelligent Categorization
-    Instead of standard K-Means (which is biased by word frequency), we use a **Prioritized Knowledge Base** to anchor nouns to super-categories. This ensures that tools like 'Pliers' aren't mislabeled as 'Pipes' just because they both mention a 'Size'.
+    ### 2. Intelligent Categorization
+    Instead of standard K-Means (which is biased by word frequency), we use a **Prioritized Knowledge Base** to anchor nouns to super-categories. We also run a cached Hugging Face **zero-shot classifier** (facebook/bart-large-mnli) to assign *HF_Product_Group* labels with confidence scores.
     
-    ### 3. Cluster Validation
-    We validate the knowledge-anchored categories against **K-Means** clusters to ensure semantic consistency before scoring confidence.
+    ### 3. Cluster Validation
+    We validate the knowledge-anchored categories against **K-Means** clusters to ensure semantic consistency before scoring confidence. A sentence-transformer model (all-MiniLM-L6-v2) powers additional HF clustering confidence on semantic embeddings.
     
-    ### 4. Anomaly Detection
-    We use the **Isolation Forest** algorithm. It isolates observations by randomly selecting a feature and then randomly selecting a split value. Outliers (anomalies) are easier to isolate, resulting in shorter paths.
+    ### 4. Anomaly Detection
+    We use the **Isolation Forest** algorithm on both TF-IDF features and Hugging Face embeddings to flag unusual items with *HF_Anomaly_Flag*.
     
-    ### 5. Fuzzy Match & Conflict Resolution
-    We use the **Levenshtein Distance** algorithm. However, we've added a **Business Logic Layer**: if two items have similar text but conflicting 'Technical DNA' (e.g. one is Male, one is Female), the system overrides the AI and flags it as a **Variant**, not a duplicate.
-    """)
+    ### 5. Fuzzy Match & Conflict Resolution
+    We use the **Levenshtein Distance** algorithm. However, we've added a **Business Logic Layer**: if two items have similar text but conflicting 'Technical DNA' (e.g. one is Male, one is Female), the system overrides the AI and flags it as a **Variant**, not a duplicate. We also run a semantic duplicate check using cosine similarity on sentence-transformer embeddings within a small window.
+    """)
