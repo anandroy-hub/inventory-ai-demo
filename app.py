@@ -66,6 +66,9 @@ def intelligent_noun_extractor(text):
 
 def map_product_group(noun):
     for group, keywords in PRODUCT_GROUPS.items():
+        if noun in keywords:
+            return group
+    for group, keywords in PRODUCT_GROUPS.items():
         for keyword in keywords:
             if re.search(token_pattern(keyword), noun):
                 return group
@@ -94,7 +97,9 @@ def run_intelligent_audit(file_path):
     df['Cluster_ID'] = kmeans.fit_predict(tfidf_matrix)
     dists = kmeans.transform(tfidf_matrix)
     df['Confidence'] = (1 - (np.min(dists, axis=1) / np.max(dists, axis=1))).round(4)
-    cluster_groups = df.groupby('Cluster_ID')['Product_Group'].agg(lambda x: x.value_counts().idxmax())
+    cluster_groups = df.groupby('Cluster_ID')['Product_Group'].agg(
+        lambda x: x.value_counts().idxmax() if not x.empty else "UNMAPPED"
+    )
     df['Cluster_Group'] = df['Cluster_ID'].map(cluster_groups)
     df['Cluster_Validated'] = df['Product_Group'] == df['Cluster_Group']
     
