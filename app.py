@@ -584,18 +584,18 @@ with page[4]:
     <h2>📈 Phase 4: Executive Insights (Streamlit UI)</h2>
     <p>The final layer translates complex data into actionable metrics using <b>Plotly</b>:</p>
     <ul>
-        <li><p><b>Inventory Health Gauge:</b> A real-time calculation of data accuracy .</p></li>
+        <li><p><b>Inventory Health Gauge:</b> A real-time calculation of data accuracy.</p></li>
         <li><p><b>Confidence Distribution:</b> A histogram showing the reliability of the AI's categorization.</p></li>
         <li><p><b>Duplicate Pairs:</b> A structured list of potential risks for procurement and warehouse teams.</p></li>
     </ul>
     <hr>
     <h2>🧰 Technical Stack Summary</h2>
 
-    Component | Technology
-    -- | --
-    Frontend | Streamlit
-    Data Processing | Pandas, NumPy, RegEx
-    Machine Learning | Scikit-Learn (KMeans, Isolation Forest)
-    Deep Learning | Hugging Face Inference API (BART, MiniLM)
-    Visualizations | Plotly Express &amp; Graph Objects
+    | Component | Technology |
+    | -- | -- |
+    | Frontend | Streamlit |
+    | Data Processing | Pandas, NumPy, RegEx |
+    | Machine Learning | Scikit-Learn (KMeans, Isolation Forest) |
+    | Deep Learning | Hugging Face Inference API (BART, MiniLM) |
+    | Visualizations | Plotly Express &amp; Graph Objects |
     """, unsafe_allow_html=True)
