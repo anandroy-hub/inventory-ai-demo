@@ -3,7 +3,10 @@ import pandas as pd
 import numpy as np
 import re
 import os
+import json
+import socket
 from difflib import SequenceMatcher
+from urllib import request, error
 
 # Advanced AI/ML Imports
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -12,8 +15,6 @@ from sklearn.ensemble import IsolationForest
 from sklearn.cluster import KMeans
 import plotly.express as px
 import plotly.graph_objects as go
-from transformers import pipeline
-from sentence_transformers import SentenceTransformer
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Inventory Auditor Pro", layout="wide", page_icon="🛡️")
@@ -25,6 +26,11 @@ COMPARISON_WINDOW_SIZE = 50  # Windowed comparisons keep duplicate checks lightw
 FUZZY_SIMILARITY_THRESHOLD = 0.85
 SEMANTIC_SIMILARITY_THRESHOLD = 0.9
 HF_BATCH_SIZE = 16
+HF_ZERO_SHOT_MODEL = "facebook/bart-large-mnli"
+HF_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+HF_INFERENCE_API_URL = "https://api-inference.huggingface.co/models"
+HF_INFERENCE_TIMEOUT = 30
+ENABLE_HF_MODELS = os.getenv("ENABLE_HF_MODELS", "false").lower() == "true"
 
 PRODUCT_GROUPS = {
     "Piping & Fittings": ["FLANGE", "PIPE", "ELBOW", "TEE", "UNION", "REDUCER", "BEND", "COUPLING", "NIPPLE", "BUSHING", "UPVC", "CPVC", "PVC"],
@@ -89,25 +95,52 @@ def apply_distance_floor(distances, min_threshold=MIN_DISTANCE_THRESHOLD):
     max_dist = np.max(distances, axis=1)
     return np.where(max_dist == 0, min_threshold, max_dist)
 
-@st.cache_resource
-def get_zero_shot_classifier():
+def get_hf_secret(key):
     try:
-        return pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
-    except (OSError, ImportError, ValueError):
-        st.warning("Hugging Face classifier unavailable; using existing categories.")
+        return st.secrets[key]
+    except (AttributeError, KeyError):
         return None
 
-@st.cache_resource
-def get_sentence_model():
+def get_hf_token():
+    return (
+        os.getenv("HF_TOKEN")
+        or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+        or get_hf_secret("HF_TOKEN")
+        or get_hf_secret("HUGGINGFACEHUB_API_TOKEN")
+    )
+
+def call_hf_inference(model, payload, token, warning_message):
+    if not token:
+        return None
+    data = json.dumps(payload).encode("utf-8")
+    req = request.Request(
+        f"{HF_INFERENCE_API_URL}/{model}",
+        data=data,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    )
     try:
-        return SentenceTransformer("all-MiniLM-L6-v2")
-    except (OSError, ImportError, ValueError):
-        st.warning("Sentence-transformer model unavailable; falling back to TF-IDF signals.")
+        with request.urlopen(req, timeout=HF_INFERENCE_TIMEOUT) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        if isinstance(result, dict) and result.get("error"):
+            st.warning(f"{warning_message} ({result.get('error')})")
+            return None
+        return result
+    except (error.HTTPError, error.URLError, socket.timeout, ValueError) as exc:
+        if isinstance(exc, socket.timeout):
+            detail = "timeout"
+        elif isinstance(exc, error.HTTPError):
+            detail = f"HTTP {exc.code}"
+        elif isinstance(exc, error.URLError):
+            detail = "network error"
+        else:
+            detail = "invalid response"
+        st.warning(f"{warning_message} ({detail})")
         return None
 
 def run_hf_zero_shot(texts, labels):
-    classifier = get_zero_shot_classifier()
-    if not classifier:
+    token = get_hf_token()
+    if not token:
+        st.warning("Hugging Face token missing; skipping hosted classification.")
         return None
     if isinstance(texts, str):
         texts = [texts]
@@ -115,7 +148,19 @@ def run_hf_zero_shot(texts, labels):
         results = []
         for start in range(0, len(texts), HF_BATCH_SIZE):
             batch = texts[start:start + HF_BATCH_SIZE]
-            batch_results = classifier(batch, candidate_labels=labels)
+            payload = {
+                "inputs": batch,
+                "parameters": {"candidate_labels": labels},
+                "options": {"wait_for_model": True}
+            }
+            batch_results = call_hf_inference(
+                HF_ZERO_SHOT_MODEL,
+                payload,
+                token,
+                "Hugging Face classification failed; using existing categories."
+            )
+            if not batch_results:
+                return None
             if isinstance(batch_results, dict):
                 batch_results = [batch_results]
             results.extend(batch_results)
@@ -125,11 +170,28 @@ def run_hf_zero_shot(texts, labels):
         return None
 
 def compute_embeddings(texts):
-    model = get_sentence_model()
-    if not model:
+    token = get_hf_token()
+    if not token:
+        st.warning("Hugging Face token missing; skipping hosted embeddings.")
         return None
     try:
-        embeddings = model.encode(texts, show_progress_bar=False, batch_size=HF_BATCH_SIZE)
+        embeddings = []
+        for start in range(0, len(texts), HF_BATCH_SIZE):
+            batch = texts[start:start + HF_BATCH_SIZE]
+            payload = {"inputs": batch, "options": {"wait_for_model": True}}
+            batch_embeddings = call_hf_inference(
+                HF_EMBEDDING_MODEL,
+                payload,
+                token,
+                "Embedding generation failed; falling back to TF-IDF signals."
+            )
+            if not batch_embeddings:
+                return None
+            if isinstance(batch_embeddings, list) and len(batch_embeddings) > 0 and isinstance(batch_embeddings[0], (int, float)):
+                # Hugging Face returns a flat list for single inputs; wrap for consistent batching.
+                batch_embeddings = [batch_embeddings]
+            embeddings.extend(batch_embeddings)
+        embeddings = np.array(embeddings, dtype=float)
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms[norms == 0] = 1
         return embeddings / norms
@@ -139,7 +201,7 @@ def compute_embeddings(texts):
 
 # --- MAIN ENGINE ---
 @st.cache_data
-def run_intelligent_audit(file_path):
+def run_intelligent_audit(file_path, enable_hf_models=False):
     df = pd.read_csv(file_path, encoding='latin1')
     df.columns = [c.strip() for c in df.columns]
     id_col = next(c for c in df.columns if any(x in c.lower() for x in ['item', 'no']))
@@ -167,8 +229,10 @@ def run_intelligent_audit(file_path):
     iso = IsolationForest(contamination=0.04, random_state=42)
     df['Anomaly_Flag'] = iso.fit_predict(tfidf_matrix) # Using tfidf for complexity-based anomalies
 
+    standard_desc = df['Standard_Desc'].tolist() if enable_hf_models else None
+
     # Hugging Face Zero-Shot Classification
-    hf_results = run_hf_zero_shot(df['Standard_Desc'].tolist(), list(PRODUCT_GROUPS.keys()))
+    hf_results = run_hf_zero_shot(standard_desc, list(PRODUCT_GROUPS.keys())) if enable_hf_models else None
     if hf_results:
         df['HF_Product_Group'] = [res['labels'][0] for res in hf_results]
         df['HF_Product_Confidence'] = [round(res['scores'][0], 4) for res in hf_results]
@@ -177,7 +241,7 @@ def run_intelligent_audit(file_path):
         df['HF_Product_Confidence'] = df['Confidence']
 
     # Hugging Face Embeddings for Clustering/Anomaly
-    embeddings = compute_embeddings(df['Standard_Desc'].tolist())
+    embeddings = compute_embeddings(standard_desc) if enable_hf_models else None
     if embeddings is not None:
         kmeans_hf = KMeans(n_clusters=8, random_state=42, n_init=10)
         df['HF_Cluster_ID'] = kmeans_hf.fit_predict(embeddings)
@@ -201,7 +265,7 @@ def run_intelligent_audit(file_path):
 # --- DATA LOADING ---
 target_file = 'raw_data.csv'
 if os.path.exists(target_file):
-    df_raw, id_col, desc_col = run_intelligent_audit(target_file)
+    df_raw, id_col, desc_col = run_intelligent_audit(target_file, enable_hf_models=ENABLE_HF_MODELS)
 else:
     st.error("Data file missing from repository. Please ensure 'raw_data.csv' is present.")
     st.stop()
@@ -215,9 +279,6 @@ st.markdown("### Advanced Inventory Intelligence & Quality Management")
 
 # Modern horizontal tab navigation
 page = st.tabs(["📈 Executive Dashboard", "📍 Categorization Audit", "🚨 Quality Hub (Anomalies/Dups)", "🧠 Technical Methodology"])
-
-# Initialize filtered dataframe (will be filtered per page as needed)
-df = df_raw.copy()
 
 # --- PAGE: EXECUTIVE DASHBOARD ---
 with page[0]:
