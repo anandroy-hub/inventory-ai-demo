@@ -89,7 +89,6 @@ def run_intelligent_audit(file_path):
     df['Standard_Desc'] = df[desc_col].apply(clean_description)
     df['Part_Noun'] = df['Standard_Desc'].apply(intelligent_noun_extractor)
     df['Product_Group'] = df['Part_Noun'].apply(map_product_group)
-    df.loc[~df['Product_Group'].isin(PRODUCT_GROUPS.keys()), 'Product_Group'] = DEFAULT_PRODUCT_GROUP
 
     # NLP & Topic Modeling
     tfidf = TfidfVectorizer(max_features=300, stop_words='english')
