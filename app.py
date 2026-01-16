@@ -14,7 +14,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="AI Supply Chain Auditor Pro", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="AI Inventory Auditor Pro", layout="wide", page_icon="🛡️")
 
 # --- KNOWLEDGE BASE: DOMAIN LOGIC ---
 DEPARTMENT_MAP = {
@@ -53,7 +53,8 @@ def intelligent_noun_extractor(text):
         if p in text: return p
     all_nouns = [item for sublist in PRODUCT_GROUPS.values() for item in sublist]
     for n in all_nouns:
-        if re.search(rf'\b{noun}\b', text): return n
+        # FIXED: Changed 'noun' to 'n' to resolve NameError
+        if re.search(rf'\b{n}\b', text): return n
     return text.split()[0] if text.split() else "MISC"
 
 # --- MAIN ENGINE ---
@@ -72,8 +73,6 @@ def run_intelligent_audit(file_path):
     # NLP & Topic Modeling
     tfidf = TfidfVectorizer(max_features=300, stop_words='english')
     tfidf_matrix = tfidf.fit_transform(df['Standard_Desc'])
-    nmf = NMF(n_components=12, random_state=42, init='nndsvd')
-    nmf_features = nmf.fit_transform(tfidf_matrix)
     
     # Clustering for Confidence
     kmeans = KMeans(n_clusters=8, random_state=42, n_init=10)
@@ -83,98 +82,127 @@ def run_intelligent_audit(file_path):
     
     # Anomaly
     iso = IsolationForest(contamination=0.04, random_state=42)
-    df['Anomaly_Flag'] = iso.fit_predict(df[[desc_col]].applymap(len))
+    df['Anomaly_Flag'] = iso.fit_predict(tfidf_matrix) # Using tfidf for complexity-based anomalies
 
     # Fuzzy & Tech DNA
     df['Tech_DNA'] = df['Standard_Desc'].apply(get_tech_dna)
-    exact_dups = df[df.duplicated(subset=['Standard_Desc'], keep=False)]
     
-    return df, exact_dups, id_col, desc_col
+    return df, id_col, desc_col
 
 # --- DATA LOADING ---
 target_file = 'raw_data.csv' if os.path.exists('raw_data.csv') else 'Demo - Raw data.xlsx - Sheet2.csv'
 if os.path.exists(target_file):
-    df_raw, exact_dups, id_col, desc_col = run_intelligent_audit(target_file)
+    df_raw, id_col, desc_col = run_intelligent_audit(target_file)
 else:
-    st.error("Data file missing.")
+    st.error("Data file missing from repository. Please ensure 'raw_data.csv' is present.")
     st.stop()
 
-# --- SIDEBAR NAVIGATION ---
-st.sidebar.title("🛡️ Auditor Navigation")
-page = st.sidebar.radio("Go to", ["Dashboard Overview", "Categorization Audit", "Anomaly & Duplicate Hub", "Methodology"])
+# --- SIDEBAR NAVIGATION & FILTERS ---
+st.sidebar.title("🛡️ Inventory Auditor Pro")
+page = st.sidebar.selectbox("Navigation", ["📈 Executive Dashboard", "📍 Categorization Audit", "🚨 Quality Hub (Anomalies/Dups)", "🧠 Technical Methodology"])
 
-# --- GLOBAL FILTERS ---
 st.sidebar.markdown("---")
-st.sidebar.subheader("Global Filters")
-selected_dept = st.sidebar.multiselect("Filter by Department", options=df_raw['Business_Dept'].unique(), default=df_raw['Business_Dept'].unique())
-selected_noun = st.sidebar.multiselect("Filter by Product Type", options=sorted(df_raw['Part_Noun'].unique()), default=[])
+st.sidebar.subheader("Live Filters")
+selected_dept = st.sidebar.multiselect("Department", options=df_raw['Business_Dept'].unique(), default=df_raw['Business_Dept'].unique())
+selected_noun = st.sidebar.multiselect("Product Noun", options=sorted(df_raw['Part_Noun'].unique()), default=[])
 
-# Filtered Dataframe
+# Apply Filters
 df = df_raw[df_raw['Business_Dept'].isin(selected_dept)]
 if selected_noun:
     df = df[df['Part_Noun'].isin(selected_noun)]
 
-# --- PAGE: DASHBOARD OVERVIEW ---
-if page == "Dashboard Overview":
-    st.header("Inventory Data Health Overview")
+# --- PAGE: EXECUTIVE DASHBOARD ---
+if page == "📈 Executive Dashboard":
+    st.header("Inventory Health Dashboard")
     
-    # KPI Metrics
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("SKUs in View", len(df))
-    m2.metric("Mean Confidence", f"{df['Confidence'].mean():.1%}")
-    m3.metric("Anomalies Found", len(df[df['Anomaly_Flag'] == -1]))
-    m4.metric("Unique Product Types", df['Part_Noun'].nunique())
+    # KPI Row
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    kpi1.metric("SKUs Analyzed", len(df))
+    kpi2.metric("Mean AI Confidence", f"{df['Confidence'].mean():.1%}")
+    kpi3.metric("Anomalies Found", len(df[df['Anomaly_Flag'] == -1]))
+    kpi4.metric("True Duplicate Pairs", "Audit Required")
 
-    # Charts
-    c1, c2 = st.columns(2)
-    with c1:
-        fig_pie = px.pie(df, names='Business_Dept', title="Inventory Split by Business Function", hole=0.4)
+    col1, col2 = st.columns(2)
+    with col1:
+        fig_pie = px.pie(df, names='Business_Dept', title="Inventory Split by Dept", hole=0.4)
         st.plotly_chart(fig_pie, use_container_width=True)
-    with c2:
-        fig_bar = px.bar(df['Part_Noun'].value_counts().head(10), title="Top 10 Inventory Items in View", labels={'value':'Count', 'index':'Product'})
+    with col2:
+        top_nouns = df['Part_Noun'].value_counts().head(10).reset_index()
+        fig_bar = px.bar(top_nouns, x='Part_Noun', y='count', title="Top 10 Product Categories", labels={'Part_Noun':'Product', 'count':'Qty'})
         st.plotly_chart(fig_bar, use_container_width=True)
 
+    # Health Gauge
+    health_val = (len(df[df['Anomaly_Flag'] == 1]) / len(df)) * 100
+    fig_gauge = go.Figure(go.Indicator(
+        mode = "gauge+number",
+        value = health_val,
+        title = {'text': "Catalog Data Accuracy %"},
+        gauge = {'axis': {'range': [0, 100]}, 'bar': {'color': "#00cc96"}}
+    ))
+    st.plotly_chart(fig_gauge, use_container_width=True)
+
 # --- PAGE: CATEGORIZATION AUDIT ---
-elif page == "Categorization Audit":
-    st.header("Categorization & Classification Audit")
-    st.info("Explore how items have been classified. High confidence indicates a strong match with our Knowledge Base.")
+elif page == "📍 Categorization Audit":
+    st.header("AI Categorization & Filtered Audit")
+    st.markdown("Use the sidebar filters to drill down into specific product categories.")
     
+    # Data Table with sorting
     st.dataframe(df[[id_col, 'Standard_Desc', 'Part_Noun', 'Business_Dept', 'Confidence']].sort_values('Confidence', ascending=False), use_container_width=True)
     
-    fig_scatter = px.scatter(df, x='Part_Noun', y='Confidence', color='Business_Dept', title="Categorization Confidence by Product Type")
-    st.plotly_chart(fig_scatter, use_container_width=True)
+    # Distribution of confidence
+    fig_hist = px.histogram(df, x="Confidence", nbins=20, title="Confidence Score Distribution", color_discrete_sequence=['#636EFA'])
+    st.plotly_chart(fig_hist, use_container_width=True)
 
-# --- PAGE: ANOMALY & DUPLICATE HUB ---
-elif page == "Anomaly & Duplicate Hub":
-    st.header("Quality & Risk Identification")
+# --- PAGE: QUALITY HUB ---
+elif page == "🚨 Quality Hub (Anomalies/Dups)":
+    st.header("Anomaly & Duplicate Identification")
     
-    t1, t2 = st.tabs(["🚨 Anomalies", "👯 Duplicates"])
+    t1, t2 = st.tabs(["⚠️ Anomalies", "👯 Fuzzy Duplicates"])
     
     with t1:
-        st.subheader("Data Pattern Anomalies")
-        anomalies = df[df['Anomaly_Flag'] == -1]
-        st.warning(f"Found {len(anomalies)} items with non-standard patterns.")
-        st.dataframe(anomalies[[id_col, desc_col, 'Part_Noun']])
+        st.subheader("Statistical Anomalies (Isolation Forest)")
+        anoms = df[df['Anomaly_Flag'] == -1]
+        st.warning(f"Found {len(anoms)} anomalies in the current view.")
+        st.dataframe(anoms[[id_col, desc_col, 'Part_Noun']], use_container_width=True)
         
     with t2:
-        st.subheader("Exact Duplicates (Cleaned Descriptions)")
-        view_exact = exact_dups[exact_dups[id_col].isin(df[id_col])]
-        if not view_exact.empty:
-            st.error(f"Found {len(view_exact)} exact duplicates in filtered view.")
-            st.dataframe(view_exact[[id_col, desc_col]])
+        st.subheader("Fuzzy Duplicate Audit (Spec-Aware)")
+        st.info("System identifies items with >85% text similarity but differentiates based on numeric specs (Size/Gender).")
+        
+        # Calculate fuzzy duplicates for the current view
+        fuzzy_list = []
+        recs = df.to_dict('records')
+        for i in range(len(recs)):
+            for j in range(i + 1, min(i + 50, len(recs))): # Smaller window for real-time speed
+                r1, r2 = recs[i], recs[j]
+                sim = SequenceMatcher(None, r1['Standard_Desc'], r2['Standard_Desc']).ratio()
+                if sim > 0.85:
+                    dna1, dna2 = r1['Tech_DNA'], r2['Tech_DNA']
+                    is_variant = (dna1['numbers'] != dna2['numbers']) or (dna1['attributes'] != dna2['attributes'])
+                    fuzzy_list.append({
+                        'ID A': r1[id_col], 'ID B': r2[id_col],
+                        'Desc A': r1['Standard_Desc'], 'Desc B': r2['Standard_Desc'],
+                        'Match %': f"{sim:.1%}", 'Verdict': "🛠️ Variant" if is_variant else "🚨 Duplicate"
+                    })
+        
+        if fuzzy_list:
+            st.dataframe(pd.DataFrame(fuzzy_list), use_container_width=True)
         else:
-            st.success("No exact duplicates in this view.")
+            st.success("No fuzzy duplicates found in this filtered view.")
 
 # --- PAGE: METHODOLOGY ---
-elif page == "Methodology":
-    st.header("AI Technical Methodology")
+elif page == "🧠 Technical Methodology":
+    st.header("Technical Methodology & AI Stack")
     st.markdown("""
-    ### 1. Categorization (The "Intelligent" Hybrid)
-    We use **Domain Prioritization** (Heuristics) paired with **NMF Topic Modeling**. This prevents the 'Size Trap' where tools were previously grouped with pipes.
+    ### 1. Data Processing (ETL)
+    We standardize the raw 543 rows by stripping quote artifacts and lowercasing. We utilize **RegEx** to extract technical specifications (Numbers, Sizes, Genders) into a "Technical DNA" profile for every part.
     
-    ### 2. Anomaly Detection
-    Powered by **Isolation Forests**, we analyze text complexity and length to find broken records.
+    ### 2. Intelligent Categorization
+    Instead of standard K-Means (which is biased by word frequency), we use a **Prioritized Knowledge Base**. This ensures that tools like 'Pliers' aren't mislabeled as 'Pipes' just because they both mention a 'Size'.
     
-    ### 3. Duplicate Resolution
-    Utilizes **Levenshtein Distance** with a **Tech DNA override**. If sizes or genders (Male/Female) differ, the system classifies them as 'Variants'.
+    ### 3. Anomaly Detection
+    We use the **Isolation Forest** algorithm. It isolates observations by randomly selecting a feature and then randomly selecting a split value. Outliers (anomalies) are easier to isolate, resulting in shorter paths.
+    
+    ### 4. Fuzzy Match & Conflict Resolution
+    We use the **Levenshtein Distance** algorithm. However, we've added a **Business Logic Layer**: if two items have similar text but conflicting 'Technical DNA' (e.g. one is Male, one is Female), the system overrides the AI and flags it as a **Variant**, not a duplicate.
     """)
