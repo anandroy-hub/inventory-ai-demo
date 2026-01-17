@@ -27,7 +27,17 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="AI Inventory Auditor Pro", layout="wide", page_icon="🛡️")
 
 def get_streamlit_secrets():
-    """Load secrets from .streamlit/secrets.toml file."""
+    """
+    Load secrets from .streamlit/secrets.toml file.
+    
+    Returns:
+        dict: Dictionary of secrets from the TOML file. Returns empty dict if file
+              doesn't exist or cannot be parsed.
+    
+    Note:
+        This function safely handles missing files and parse errors by returning
+        an empty dictionary rather than raising exceptions.
+    """
     secrets_path = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
     if not secrets_path.exists():
         return {}
@@ -38,7 +48,26 @@ def get_streamlit_secrets():
         return {}
 
 def resolve_bool_setting(key, default=False):
-    """Resolve a boolean setting from environment variables or secrets."""
+    """
+    Resolve a boolean setting from environment variables or secrets.
+    
+    Checks in order:
+    1. Environment variable
+    2. File-based secrets (.streamlit/secrets.toml)
+    3. Streamlit secrets (st.secrets)
+    4. Default value
+    
+    Args:
+        key: The setting key to look up
+        default: Default value if key is not found (default: False)
+    
+    Returns:
+        bool: The resolved boolean value
+    
+    Note:
+        String values are converted to boolean by checking if they equal "true"
+        (case-insensitive after stripping whitespace).
+    """
     value = os.getenv(key)
     if value is None:
         # Try file-based secrets first (more reliable)
