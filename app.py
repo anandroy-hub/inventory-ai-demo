@@ -26,7 +26,7 @@ def resolve_bool_setting(key, default=False):
     if value is None:
         try:
             value = st.secrets.get(key)
-        except Exception:
+        except (AttributeError, KeyError):
             value = None
     if value is None:
         return default
