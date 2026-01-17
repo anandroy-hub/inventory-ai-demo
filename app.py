@@ -18,8 +18,8 @@ from urllib import request, error
 try:
     from streamlit.errors import StreamlitSecretNotFoundError
 except ImportError:
-    class StreamlitSecretNotFoundError(Exception):
-        pass
+    class StreamlitSecretNotFoundError(RuntimeError):
+        """Fallback when Streamlit secret errors are unavailable."""
 
 # Advanced AI/ML Imports
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -291,6 +291,11 @@ def call_gemini_api(endpoint, payload, api_key, warning_message, show_warnings=T
     Returns None on failure, result on success.
     """
     if not api_key:
+        return None
+    api_key = str(api_key).strip()
+    if not api_key or any(char in api_key for char in ("\n", "\r")):
+        if show_warnings:
+            st.warning(f"{warning_message}: Invalid API key format")
         return None
     
     data = json.dumps(payload).encode("utf-8")
