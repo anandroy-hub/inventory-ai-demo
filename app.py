@@ -183,34 +183,138 @@ def get_hf_token():
                 return token
     return None
 
+def validate_hf_token(token):
+    """Validate that the token looks like a valid Hugging Face token."""
+    if not token:
+        return False
+    token = str(token).strip()
+    # HF tokens typically start with 'hf_' and are at least 20 characters
+    if not token.startswith('hf_'):
+        return False
+    if len(token) < 20:
+        return False
+    return True
+
+def check_dns_resolution(hostname):
+    """Check if a hostname can be resolved via DNS."""
+    try:
+        socket.gethostbyname(hostname)
+        return True
+    except (socket.gaierror, socket.herror, OSError):
+        return False
+
+def check_hf_api_connectivity():
+    """
+    Check if Hugging Face API is accessible.
+    Returns a tuple: (is_accessible, error_message)
+    """
+    hostname = "api-inference.huggingface.co"
+    
+    # First check DNS resolution
+    if not check_dns_resolution(hostname):
+        return False, "dns_resolution_failed"
+    
+    # Try to establish a connection
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        sock.connect((hostname, 443))
+        sock.close()
+        return True, None
+    except socket.timeout:
+        return False, "connection_timeout"
+    except (socket.gaierror, socket.herror):
+        return False, "dns_resolution_failed"
+    except ConnectionRefusedError:
+        return False, "connection_refused"
+    except OSError as e:
+        return False, f"network_error: {str(e)}"
+    except Exception as e:
+        return False, f"unknown_error: {str(e)}"
+
 def call_hf_inference(model, payload, token, warning_message, show_warnings=True):
+    """
+    Call Hugging Face Inference API with improved error handling.
+    Returns None on failure, result on success.
+    """
     if not token:
         return None
+    
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(
         f"{HF_INFERENCE_API_URL}/{model}",
         data=data,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     )
+    
     try:
         with request.urlopen(req, timeout=HF_INFERENCE_TIMEOUT) as response:
             result = json.loads(response.read().decode("utf-8"))
+        
+        # Check if API returned an error in the response
         if isinstance(result, dict) and result.get("error"):
             if show_warnings:
-                st.warning(f"{warning_message} ({result.get('error')})")
+                error_msg = result.get('error', 'Unknown error')
+                st.warning(f"{warning_message}: API returned error - {error_msg}")
             return None
+        
         return result
-    except (error.HTTPError, error.URLError, socket.timeout, ValueError) as exc:
-        if isinstance(exc, socket.timeout):
-            detail = "timeout"
-        elif isinstance(exc, error.HTTPError):
-            detail = f"HTTP {exc.code}"
-        elif isinstance(exc, error.URLError):
-            detail = "network error"
-        else:
-            detail = "invalid response"
+        
+    except error.HTTPError as exc:
+        # HTTP errors (4xx, 5xx)
+        detail = f"HTTP {exc.code}"
+        if exc.code == 401:
+            detail += " - Invalid or expired token"
+        elif exc.code == 403:
+            detail += " - Access forbidden"
+        elif exc.code == 429:
+            detail += " - Rate limit exceeded"
+        elif exc.code >= 500:
+            detail += " - Server error"
+        
         if show_warnings:
-            st.warning(f"{warning_message} ({detail})")
+            st.warning(f"{warning_message}: {detail}")
+        return None
+        
+    except error.URLError as exc:
+        # Network/DNS errors
+        error_reason = str(exc.reason)
+        
+        if isinstance(exc.reason, socket.gaierror):
+            # DNS resolution failure
+            detail = "DNS resolution failed - Hugging Face API may be blocked by firewall or network"
+        elif isinstance(exc.reason, socket.timeout):
+            detail = "Connection timeout - Network may be slow or API unreachable"
+        elif "Connection refused" in error_reason:
+            detail = "Connection refused - Service may be down"
+        elif "Network is unreachable" in error_reason:
+            detail = "Network unreachable - Check network connectivity"
+        else:
+            detail = f"Network error - {error_reason}"
+        
+        if show_warnings:
+            st.warning(f"{warning_message}: {detail}")
+        return None
+        
+    except socket.timeout:
+        # Explicit timeout
+        detail = "Request timeout - API response took too long"
+        if show_warnings:
+            st.warning(f"{warning_message}: {detail}")
+        return None
+        
+    except ValueError as exc:
+        # JSON parsing error
+        detail = "Invalid response format - Could not parse API response"
+        if show_warnings:
+            st.warning(f"{warning_message}: {detail}")
+        return None
+        
+    except Exception as exc:
+        # Catch-all for unexpected errors
+        detail = f"Unexpected error - {type(exc).__name__}: {str(exc)}"
+        if show_warnings:
+            st.warning(f"{warning_message}: {detail}")
         return None
 
 def run_hf_zero_shot(texts, labels):
@@ -303,11 +407,64 @@ def is_valid_embedding_response(result):
 
 @st.cache_data(ttl=HF_CONNECTION_CACHE_TTL)
 def test_hf_inference_connection(enable_hf_models):
+    """
+    Test connection to Hugging Face Inference API with comprehensive diagnostics.
+    Returns a dict with connection status and detailed error information.
+    """
     if not enable_hf_models:
-        return {"enabled": False, "zero_shot": False, "embeddings": False, "reason": "disabled"}
+        return {
+            "enabled": False,
+            "zero_shot": False,
+            "embeddings": False,
+            "reason": "disabled",
+            "status": "disabled",
+            "error_detail": None
+        }
+    
+    # Check if token exists
     token = get_hf_token()
     if not token:
-        return {"enabled": False, "zero_shot": False, "embeddings": False, "reason": "missing_token"}
+        return {
+            "enabled": False,
+            "zero_shot": False,
+            "embeddings": False,
+            "reason": "missing_token",
+            "status": "missing_token",
+            "error_detail": "No Hugging Face token found in environment or secrets"
+        }
+    
+    # Validate token format
+    if not validate_hf_token(token):
+        return {
+            "enabled": False,
+            "zero_shot": False,
+            "embeddings": False,
+            "reason": "invalid_token",
+            "status": "invalid_token",
+            "error_detail": "Token format is invalid (should start with 'hf_' and be at least 20 characters)"
+        }
+    
+    # Check network connectivity to HF API
+    is_accessible, conn_error = check_hf_api_connectivity()
+    if not is_accessible:
+        error_details = {
+            "dns_resolution_failed": "Cannot resolve api-inference.huggingface.co - May be blocked by firewall or network policy",
+            "connection_timeout": "Connection timeout - Network may be slow or API unreachable",
+            "connection_refused": "Connection refused - Service may be down or blocked",
+        }
+        error_detail = error_details.get(conn_error, f"Network connectivity issue: {conn_error}")
+        
+        return {
+            "enabled": False,
+            "zero_shot": False,
+            "embeddings": False,
+            "reason": "network_unreachable",
+            "status": "network_unreachable",
+            "error_detail": error_detail,
+            "connectivity_error": conn_error
+        }
+    
+    # Test zero-shot classification model
     test_text = HF_CONNECTION_TEST_TEXT
     zero_shot_payload = {
         "inputs": [test_text],
@@ -317,14 +474,17 @@ def test_hf_inference_connection(enable_hf_models):
         },
         "options": {"wait_for_model": True}
     }
+    
     zero_shot_result = call_hf_inference(
         HF_ZERO_SHOT_MODEL,
         zero_shot_payload,
         token,
-        "Hugging Face connection test failed",
+        "Hugging Face zero-shot classification test failed",
         show_warnings=False
     )
     zero_shot_ok = is_valid_zero_shot_response(zero_shot_result)
+    
+    # Test embedding model
     embedding_payload = {"inputs": [test_text], "options": {"wait_for_model": True}}
     embedding_result = call_hf_inference(
         HF_EMBEDDING_MODEL,
@@ -334,20 +494,33 @@ def test_hf_inference_connection(enable_hf_models):
         show_warnings=False
     )
     embedding_ok = is_valid_embedding_response(embedding_result)
+    
+    # Determine overall status
     if zero_shot_ok and embedding_ok:
         status = "full"
+        error_detail = None
     elif zero_shot_ok or embedding_ok:
         status = "partial"
+        failed_models = []
+        if not zero_shot_ok:
+            failed_models.append("zero-shot classification")
+        if not embedding_ok:
+            failed_models.append("embeddings")
+        error_detail = f"Some models unavailable: {', '.join(failed_models)}"
     else:
         status = "unavailable"
+        error_detail = "Both zero-shot classification and embedding models failed to respond"
+    
     enabled = status in {"full", "partial"}
     reason = None if enabled else "inference_test_failed"
+    
     return {
         "enabled": enabled,
         "zero_shot": zero_shot_ok,
         "embeddings": embedding_ok,
         "reason": reason,
-        "status": status
+        "status": status,
+        "error_detail": error_detail
     }
 
 # --- MAIN ENGINE ---
@@ -442,6 +615,8 @@ group_options = list(PRODUCT_GROUPS.keys())
 # --- HEADER & MODERN NAVIGATION ---
 st.title("🛡️ AI Inventory Auditor Pro")
 st.markdown("### Advanced Inventory Intelligence & Quality Management")
+
+# Display HF connection status with detailed messaging
 if hf_status["enabled"]:
     enabled_features = []
     if hf_status["zero_shot"]:
@@ -452,13 +627,52 @@ if hf_status["enabled"]:
     status_label = hf_status.get("status", "partial")
     if status_label not in {"full", "partial"}:
         status_label = "partial"
-    st.success(f"Hugging Face Inference API connected ({status_label}: {feature_label}).")
+    st.success(f"✅ Hugging Face Inference API connected ({status_label}: {feature_label}).")
+    
+    # Show warning if partial connectivity
+    if status_label == "partial" and hf_status.get("error_detail"):
+        st.info(f"ℹ️ Note: {hf_status['error_detail']}")
+
 elif hf_status["reason"] == "disabled":
-    st.info("Hugging Face models disabled. Set ENABLE_HF_MODELS=true to enable hosted inference.")
+    st.info("ℹ️ **Hugging Face models disabled.** Using local ML models for analysis.\n\n"
+            "To enable hosted inference:\n"
+            "- Set `ENABLE_HF_MODELS=true` in environment or `.streamlit/secrets.toml`\n"
+            "- Provide a token via `HF_TOKEN` environment variable or secrets")
+
 elif hf_status["reason"] == "missing_token":
-    st.warning("Hugging Face token missing; using local signals instead of hosted inference.")
+    st.warning("⚠️ **Hugging Face token missing.** Using local signals instead of hosted inference.\n\n"
+               "To enable hosted models:\n"
+               "- Obtain a token from https://huggingface.co/settings/tokens\n"
+               "- Set via environment variable: `HF_TOKEN=your_token`\n"
+               "- Or add to `.streamlit/secrets.toml`: `HF_TOKEN = \"your_token\"`")
+
+elif hf_status["reason"] == "invalid_token":
+    st.warning("⚠️ **Hugging Face token format is invalid.** Using local signals instead.\n\n"
+               f"Details: {hf_status.get('error_detail', 'Token validation failed')}\n\n"
+               "Valid tokens should:\n"
+               "- Start with 'hf_'\n"
+               "- Be at least 20 characters long\n"
+               "- Obtain from https://huggingface.co/settings/tokens")
+
+elif hf_status["reason"] == "network_unreachable":
+    st.error("🚫 **Cannot reach Hugging Face API.** Using local signals instead.\n\n"
+             f"**Issue:** {hf_status.get('error_detail', 'Network connectivity problem')}\n\n"
+             "**Possible causes:**\n"
+             "- Corporate firewall blocking api-inference.huggingface.co\n"
+             "- Network policy restrictions\n"
+             "- DNS resolution issues\n"
+             "- Internet connectivity problems\n\n"
+             "**Resolution:**\n"
+             "- Contact your network administrator to whitelist api-inference.huggingface.co\n"
+             "- Check your network/firewall settings\n"
+             "- Verify internet connectivity")
+
 else:
-    st.warning("Hugging Face Inference API connection test failed; using local signals instead.")
+    # Generic failure
+    error_detail = hf_status.get('error_detail', 'Connection test failed')
+    st.warning(f"⚠️ **Hugging Face Inference API connection test failed.** Using local signals instead.\n\n"
+               f"Details: {error_detail}\n\n"
+               "The application will continue using local ML models for analysis.")
 
 # Modern horizontal tab navigation
 page = st.tabs(["📈 Executive Dashboard", "📍 Categorization Audit", "🚨 Quality Hub (Anomalies/Dups)", "🧠 Technical Methodology", "🧭 My Approach"])
