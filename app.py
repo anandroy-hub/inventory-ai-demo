@@ -14,6 +14,11 @@ import time
 from pathlib import Path
 from difflib import SequenceMatcher
 from urllib import request, error
+try:
+    from streamlit.errors import StreamlitSecretNotFoundError
+except ImportError:
+    class StreamlitSecretNotFoundError(Exception):
+        pass
 
 # Advanced AI/ML Imports
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -215,8 +220,8 @@ def get_gemini_secret(key):
     if key in secrets:
         return secrets[key]
     try:
-        return st.secrets.get(key)
-    except Exception:
+        return st.secrets[key]
+    except (AttributeError, KeyError, StreamlitSecretNotFoundError):
         return None
 
 def get_gemini_api_key():
@@ -365,9 +370,9 @@ def call_gemini_api(endpoint, payload, api_key, warning_message, show_warnings=T
             st.warning(f"{warning_message}: {detail}")
         return None
         
-    except ValueError:
+    except ValueError as exc:
         # JSON parsing error
-        detail = "Invalid response format - Could not parse API response"
+        detail = f"Invalid response format - {exc}"
         if show_warnings:
             st.warning(f"{warning_message}: {detail}")
         return None
@@ -478,19 +483,17 @@ def run_gemini_classification(texts, labels):
         texts = [texts]
     try:
         results = []
-        for start in range(0, len(texts), GEMINI_BATCH_SIZE):
-            batch = texts[start:start + GEMINI_BATCH_SIZE]
-            for text in batch:
-                prompt = build_gemini_prompt(text, labels)
-                response_text = call_gemini_generate(
-                    prompt,
-                    api_key,
-                    "Gemini classification failed; using existing categories."
-                )
-                parsed = parse_gemini_classification_response(response_text, labels)
-                if not parsed:
-                    return None
-                results.append(parsed)
+        for text in texts:
+            prompt = build_gemini_prompt(text, labels)
+            response_text = call_gemini_generate(
+                prompt,
+                api_key,
+                "Gemini classification failed; using existing categories."
+            )
+            parsed = parse_gemini_classification_response(response_text, labels)
+            if not parsed:
+                return None
+            results.append(parsed)
         return results
     except (RuntimeError, ValueError):
         st.warning("Gemini classification failed; using existing categories.")
@@ -503,17 +506,15 @@ def compute_embeddings(texts):
         return None
     try:
         embeddings = []
-        for start in range(0, len(texts), GEMINI_BATCH_SIZE):
-            batch = texts[start:start + GEMINI_BATCH_SIZE]
-            for text in batch:
-                embedding = call_gemini_embedding(
-                    text,
-                    api_key,
-                    "Embedding generation failed; falling back to TF-IDF signals."
-                )
-                if not embedding:
-                    return None
-                embeddings.append(embedding)
+        for text in texts:
+            embedding = call_gemini_embedding(
+                text,
+                api_key,
+                "Embedding generation failed; falling back to TF-IDF signals."
+            )
+            if not embedding:
+                return None
+            embeddings.append(embedding)
         embeddings = np.array(embeddings, dtype=float)
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms[norms == 0] = 1

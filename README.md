@@ -24,7 +24,7 @@ The app includes comprehensive connection diagnostics:
 
 **Invalid API Key:**
 - Ensure your API key is at least 20 characters long
-- Obtain a valid key from https://aistudio.google.com/app/apikey
+- Obtain a valid key from https://aistudio.google.com/apikey
 
 **Connection Timeout:**
 - Network may be slow or API temporarily unreachable
