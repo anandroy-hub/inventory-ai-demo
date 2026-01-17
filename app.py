@@ -5,6 +5,7 @@ import re
 import os
 import json
 import socket
+import threading
 from concurrent.futures import ThreadPoolExecutor
 try:
     import tomllib
@@ -114,9 +115,11 @@ GEMINI_MAX_RETRIES = 2  # Number of retries for transient failures
 GEMINI_RETRY_DELAY = 2  # Base delay between retries in seconds
 GEMINI_MAX_RETRY_DELAY = 10  # Maximum delay cap for exponential backoff
 GEMINI_API_KEY_MIN_LENGTH = 20  # Minimum length for valid Gemini API keys
-GEMINI_MAX_WORKERS = 4
-GEMINI_LABEL_SIMILARITY_THRESHOLD = 0.8
-GEMINI_API_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+GEMINI_MAX_WORKERS = 2
+GEMINI_REQUEST_DELAY = 0.1  # Throttle concurrent calls to avoid API rate limits.
+GEMINI_LABEL_SIMILARITY_THRESHOLD = 0.8  # Similarity floor for choosing closest label match.
+GEMINI_API_KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+GEMINI_REQUEST_SEMAPHORE = threading.Semaphore(GEMINI_MAX_WORKERS)
 GEMINI_API_KEY_KEYS = (
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY"
@@ -246,7 +249,7 @@ def validate_gemini_api_key(api_key):
         return False
     if any(ord(char) < 32 for char in api_key):
         return False
-    return bool(GEMINI_API_KEY_PATTERN.fullmatch(api_key))
+    return bool(GEMINI_API_KEY_PATTERN.search(api_key))
 
 def check_dns_resolution(hostname):
     """Check if a hostname can be resolved via DNS."""
@@ -432,15 +435,16 @@ def normalize_gemini_label(label, labels):
         return None
     label_text = str(label).strip().lower()
     lowered_labels = [(candidate, candidate.lower()) for candidate in labels]
-    partial_match = None
+    best_match = None
+    best_similarity = 0.0
     for candidate, candidate_text in lowered_labels:
         if label_text == candidate_text:
             return candidate
-        if partial_match is None:
-            similarity = SequenceMatcher(None, label_text, candidate_text).ratio()
-            if similarity >= GEMINI_LABEL_SIMILARITY_THRESHOLD:
-                partial_match = candidate
-    return partial_match
+        similarity = SequenceMatcher(None, label_text, candidate_text).ratio()
+        if similarity >= GEMINI_LABEL_SIMILARITY_THRESHOLD and similarity > best_similarity:
+            best_similarity = similarity
+            best_match = candidate
+    return best_match
 
 def parse_gemini_classification_response(response_text, labels):
     payload = extract_json_from_text(response_text)
@@ -525,12 +529,14 @@ def run_gemini_classification(texts, labels):
     max_workers = min(GEMINI_MAX_WORKERS, GEMINI_BATCH_SIZE, len(texts))
     def classify_text(text):
         prompt = build_gemini_prompt(text, labels)
-        response_text = call_gemini_generate(
-            prompt,
-            api_key,
-            "Gemini classification failed; using existing categories.",
-            show_warnings=False
-        )
+        with GEMINI_REQUEST_SEMAPHORE:
+            time.sleep(GEMINI_REQUEST_DELAY)
+            response_text = call_gemini_generate(
+                prompt,
+                api_key,
+                "Gemini classification failed; using existing categories.",
+                show_warnings=False
+            )
         return parse_gemini_classification_response(response_text, labels)
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -539,8 +545,11 @@ def run_gemini_classification(texts, labels):
             st.warning("Gemini classification failed; using existing categories.")
             return None
         return results
-    except (RuntimeError, ValueError):
-        st.warning("Gemini classification failed; using existing categories.")
+    except (RuntimeError, ValueError) as exc:
+        st.warning(f"Gemini classification failed; using existing categories. ({exc})")
+        return None
+    except Exception as exc:
+        st.warning(f"Gemini classification failed; using existing categories. ({exc})")
         return None
 
 def compute_embeddings(texts):
@@ -552,12 +561,14 @@ def compute_embeddings(texts):
         return None
     max_workers = min(GEMINI_MAX_WORKERS, GEMINI_BATCH_SIZE, len(texts))
     def embed_text(text):
-        return call_gemini_embedding(
-            text,
-            api_key,
-            "Embedding generation failed; falling back to TF-IDF signals.",
-            show_warnings=False
-        )
+        with GEMINI_REQUEST_SEMAPHORE:
+            time.sleep(GEMINI_REQUEST_DELAY)
+            return call_gemini_embedding(
+                text,
+                api_key,
+                "Embedding generation failed; falling back to TF-IDF signals.",
+                show_warnings=False
+            )
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             embeddings = list(executor.map(embed_text, texts))
@@ -568,8 +579,11 @@ def compute_embeddings(texts):
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms[norms == 0] = 1
         return embeddings / norms
-    except (RuntimeError, ValueError):
-        st.warning("Embedding generation failed; falling back to TF-IDF signals.")
+    except (RuntimeError, ValueError) as exc:
+        st.warning(f"Embedding generation failed; falling back to TF-IDF signals. ({exc})")
+        return None
+    except Exception as exc:
+        st.warning(f"Embedding generation failed; falling back to TF-IDF signals. ({exc})")
         return None
 
 def is_valid_classification_item(item):
@@ -1121,7 +1135,7 @@ with page[3]:
     We use the **Isolation Forest** algorithm on both TF-IDF features and Gemini embeddings to flag unusual items with *Gemini_Anomaly_Flag*.
     
     ### 5. Fuzzy Match & Conflict Resolution
-    We use the **Levenshtein Distance** algorithm. However, we've added a **Business Logic Layer**: if two items have similar text but conflicting 'Technical DNA' (e.g. one is Male, one is Female), the system overrides the AI and flags it as a **Variant**, not a duplicate. We also run a semantic duplicate check using cosine similarity on sentence-transformer embeddings within a small window.
+    We use the **Levenshtein Distance** algorithm. However, we've added a **Business Logic Layer**: if two items have similar text but conflicting 'Technical DNA' (e.g. one is Male, one is Female), the system overrides the AI and flags it as a **Variant**, not a duplicate. We also run a semantic duplicate check using cosine similarity on Gemini embeddings (text-embedding-004) within a small window.
     """)
 
 # --- PAGE: MY APPROACH ---
