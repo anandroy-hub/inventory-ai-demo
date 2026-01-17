@@ -116,6 +116,7 @@ GEMINI_MAX_RETRY_DELAY = 10  # Maximum delay cap for exponential backoff
 GEMINI_API_KEY_MIN_LENGTH = 20  # Minimum length for valid Gemini API keys
 GEMINI_MAX_WORKERS = 4
 GEMINI_LABEL_SIMILARITY_THRESHOLD = 0.8
+GEMINI_API_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 GEMINI_API_KEY_KEYS = (
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY"
@@ -241,7 +242,11 @@ def validate_gemini_api_key(api_key):
     if not api_key:
         return False
     api_key = str(api_key).strip()
-    return len(api_key) >= GEMINI_API_KEY_MIN_LENGTH
+    if len(api_key) < GEMINI_API_KEY_MIN_LENGTH:
+        return False
+    if any(ord(char) < 32 for char in api_key):
+        return False
+    return bool(GEMINI_API_KEY_PATTERN.fullmatch(api_key))
 
 def check_dns_resolution(hostname):
     """Check if a hostname can be resolved via DNS."""
@@ -293,7 +298,7 @@ def call_gemini_api(endpoint, payload, api_key, warning_message, show_warnings=T
     if not api_key:
         return None
     api_key = str(api_key).strip()
-    if not api_key or any(char in api_key for char in ("\n", "\r")):
+    if not validate_gemini_api_key(api_key):
         if show_warnings:
             st.warning(f"{warning_message}: Invalid API key format")
         return None
