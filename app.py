@@ -114,6 +114,8 @@ GEMINI_MAX_RETRIES = 2  # Number of retries for transient failures
 GEMINI_RETRY_DELAY = 2  # Base delay between retries in seconds
 GEMINI_MAX_RETRY_DELAY = 10  # Maximum delay cap for exponential backoff
 GEMINI_API_KEY_MIN_LENGTH = 20  # Minimum length for valid Gemini API keys
+GEMINI_MAX_WORKERS = 4
+GEMINI_LABEL_SIMILARITY_THRESHOLD = 0.8
 GEMINI_API_KEY_KEYS = (
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY"
@@ -388,10 +390,24 @@ def extract_json_from_text(text):
     except ValueError:
         return None
     depth = 0
+    in_string = False
+    escape = False
     for idx in range(start, len(cleaned)):
-        if cleaned[idx] == "{":
+        char = cleaned[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
             depth += 1
-        elif cleaned[idx] == "}":
+        elif char == "}":
             depth -= 1
             if depth == 0:
                 snippet = cleaned[start:idx + 1]
@@ -410,8 +426,10 @@ def normalize_gemini_label(label, labels):
     for candidate, candidate_text in lowered_labels:
         if label_text == candidate_text:
             return candidate
-        if partial_match is None and (label_text in candidate_text or candidate_text in label_text):
-            partial_match = candidate
+        if partial_match is None:
+            similarity = SequenceMatcher(None, label_text, candidate_text).ratio()
+            if similarity >= GEMINI_LABEL_SIMILARITY_THRESHOLD:
+                partial_match = candidate
     return partial_match
 
 def parse_gemini_classification_response(response_text, labels):
@@ -494,7 +512,7 @@ def run_gemini_classification(texts, labels):
         texts = [texts]
     if not texts:
         return None
-    max_workers = min(4, GEMINI_BATCH_SIZE, len(texts))
+    max_workers = min(GEMINI_MAX_WORKERS, GEMINI_BATCH_SIZE, len(texts))
     def classify_text(text):
         prompt = build_gemini_prompt(text, labels)
         response_text = call_gemini_generate(
@@ -522,7 +540,7 @@ def compute_embeddings(texts):
         return None
     if not texts:
         return None
-    max_workers = min(4, GEMINI_BATCH_SIZE, len(texts))
+    max_workers = min(GEMINI_MAX_WORKERS, GEMINI_BATCH_SIZE, len(texts))
     def embed_text(text):
         return call_gemini_embedding(
             text,
