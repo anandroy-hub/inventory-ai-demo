@@ -24,5 +24,8 @@ Thumbs.db
 .streamlit/*
 !.streamlit/secrets.toml.example
 
+# Environment variables
+.env
+
 # Logs
 *.log
