@@ -7,10 +7,13 @@ import json
 import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    # Load environment variables from .env file
+    load_dotenv()
+except ImportError:
+    # dotenv is optional; secrets can be provided via environment or Streamlit secrets
+    pass
 try:
     import tomllib
 except ImportError:
