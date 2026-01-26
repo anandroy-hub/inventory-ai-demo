@@ -89,7 +89,7 @@ def resolve_bool_setting(key, default=False):
             # Fall back to st.secrets as last resort
             try:
                 value = st.secrets.get(key)
-            except (AttributeError, KeyError):
+            except (AttributeError, KeyError, StreamlitSecretNotFoundError):
                 value = None
     if value is None:
         return default
